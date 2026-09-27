@@ -1,0 +1,21 @@
+resources:
+  pipelines:
+    arpa_bg_bronze_pipeline:
+      name: "[${bundle.target}] ARPA Bergamo Medallion Pipeline"
+      catalog: ${var.catalog}
+      target: ${var.bronze_schema}
+      continuous: false
+      serverless: true
+      libraries:
+        - notebook:
+            path: ../notebooks/01_ingest_bronze.py
+        - notebook:
+            path: ../notebooks/02_transform_silver.py
+        - notebook:
+            path: ../notebooks/03_aggregations_gold.py
+      configuration:
+        catalog: ${var.catalog}
+        bronze_schema: ${var.bronze_schema}
+        silver_schema: ${var.silver_schema}
+        gold_schema: ${var.gold_schema}
+        landing_volume: "/Volumes/${var.catalog}/${var.bronze_schema}/landing"

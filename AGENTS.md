@@ -308,8 +308,8 @@ Agents must consult and apply the following domain-specific skills from the dev 
    - Structuring task DAGs, setting retry policies, defining serverless compute, and configuring parameter passing via `base_parameters`.
 4. **PySpark & Delta Lake Optimization (`pyspark` / `delta`)**:
    - Optimized patterns for Delta `MERGE` operations, Liquid Clustering, partitioning, schema evolution, and avoiding driver-side anti-patterns (such as unbounded `.collect()` or unneeded `.toPandas()`).
-5. **Delta Live Tables & Declarative Pipelines (`dlt-pipelines`)**:
-   - Declarative streaming/batch pipelines and data quality expectations (`@dlt.expect_or_drop`).
+5. **Spark Declarative Pipelines & Lakeflow (`pyspark.pipelines`)**:
+   - Declarative streaming/batch pipelines and data quality expectations using standard `from pyspark import pipelines as dp` (`@dp.expect_or_drop`, `dp.create_streaming_table`, `dp.create_auto_cdc_flow`).
 
 ### 9.3 Installation & Management
 - Install and configure skills via the Databricks AI Dev Kit or the official Databricks CLI:

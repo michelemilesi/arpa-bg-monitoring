@@ -1,0 +1,22 @@
+resources:
+  jobs:
+    arpa_bg_pipeline_job:
+      name: "[${bundle.target}] ARPA Bergamo Air Quality Workflow"
+      max_concurrent_runs: 1
+      queue:
+        enabled: false
+      tasks:
+        - task_key: fetch_api_to_landing
+          notebook_task:
+            notebook_path: ../notebooks/00_land_api_to_volume.py
+            base_parameters:
+              catalog: ${var.catalog}
+              bronze_schema: ${var.bronze_schema}
+              silver_schema: ${var.silver_schema}
+              gold_schema: ${var.gold_schema}
+              filter_province: "BG"
+        - task_key: bronze_pipeline
+          depends_on:
+            - task_key: fetch_api_to_landing
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.arpa_bg_bronze_pipeline.id}

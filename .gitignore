@@ -1,3 +1,16 @@
+.vscode
+
+.databricks/
+build/
+dist/
+__pycache__/
+*.egg-info
+.venv/
+scratch/**
+!scratch/README.md
+**/explorations/**
+**/!explorations/README.md
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -216,3 +229,4 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
