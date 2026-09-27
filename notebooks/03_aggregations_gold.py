@@ -3,12 +3,14 @@
 # MAGIC # 03 - Spark Declarative Pipeline (Gold Analytics & KPIs - SCD1)
 # MAGIC 
 # MAGIC This notebook implements the **Gold Layer** of the Spark Declarative Pipeline using `pyspark.pipelines`:
-# MAGIC 1. Reads current active records (`__END_AT IS NULL`) from the Silver SCD2 tables (`stazioni_aria`, `rilevazioni_aria`).
+# MAGIC 1. Reads current active records (`__END_AT IS NULL`) from Silver SCD2 tables (`stazioni_aria`, `rilevazioni_aria`, `anagrafica_stime`).
 # MAGIC 2. Implements **SCD1** aggregate datasets (current snapshot state updated in-place via Declarative Pipeline Materialized Views).
 # MAGIC 3. Computes:
 # MAGIC    - **`daily_metrics`**: Daily average, minimum, maximum, and 24-hour reading completeness percentage by municipality and pollutant.
 # MAGIC    - **`exceedances`**: Legal threshold exceedances based on Italian regulatory standards (D.Lgs. 155/2010) for PM10, PM2.5, NO2, and Ozone.
 # MAGIC    - **`station_summary`**: High-level station registry overview with geographic coordinates, active sensors, and temporal range.
+# MAGIC    - **`comuni`**: Comprehensive catalog of municipalities in the Province of Bergamo from municipal estimates registry (`anagrafica_stime`).
+# MAGIC    - **`inquinanti`**: Catalog of monitored and estimated air pollutants with coverage and legal thresholds.
 # MAGIC 4. Clean table names without layer prefixes within the Gold schema (`gold_schema`).
 # MAGIC 5. Explicit schemas and full English comments on all tables and columns.
 
@@ -39,6 +41,8 @@ gold_schema = spark.conf.get("gold_schema", "dev_gold")
 target_daily_metrics = f"{gold_schema}.daily_metrics"
 target_exceedances = f"{gold_schema}.exceedances"
 target_station_summary = f"{gold_schema}.station_summary"
+target_comuni = f"{gold_schema}.comuni"
+target_inquinanti = f"{gold_schema}.inquinanti"
 
 # COMMAND ----------
 
@@ -282,5 +286,148 @@ def station_summary():
                 spark_max(greatest(col("s._ingestion_ts"), col("r._ingestion_ts"))),
                 spark_max(col("s._ingestion_ts"))
             ).alias("_updated_at")
+        )
+    )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 4. Gold Municipalities Catalog (`comuni`) from Municipal Estimates Registry
+
+# COMMAND ----------
+
+COMUNI_SCHEMA = """
+    comune STRING COMMENT 'Municipality name in the Province of Bergamo',
+    provincia STRING COMMENT 'Province code (strictly BG)',
+    num_sensori_totali LONG COMMENT 'Total number of municipal air quality estimate sensors',
+    num_sensori_attivi LONG COMMENT 'Number of currently active estimate sensors in the municipality',
+    inquinanti_stimati STRING COMMENT 'Comma-separated list of estimated pollutants in the municipality',
+    data_inizio_attivita TIMESTAMP COMMENT 'Earliest start date of municipal air quality estimates',
+    data_fine_attivita TIMESTAMP COMMENT 'Latest deactivation date of estimate sensors (NULL if currently active)',
+    _updated_at TIMESTAMP COMMENT 'Deterministic timestamp of latest source ingestion (_ingestion_ts)'
+"""
+
+@dp.table(
+    name=target_comuni,
+    comment="Catalog of municipalities in the Province of Bergamo derived from municipal estimates registry (SCD1)",
+    schema=COMUNI_SCHEMA,
+    table_properties={
+        "quality": "gold",
+        "pipelines.autoOptimize.zOrderCols": "comune"
+    }
+)
+def comuni():
+    """
+    Produces the distinct list of municipalities in Bergamo from active anagrafica_stime records,
+    enriching each municipality with sensor counts, estimated pollutants, and activity window.
+    """
+    silver_stime = (
+        dp.read(f"{silver_schema}.anagrafica_stime")
+        .filter(col("__END_AT").isNull())
+    )
+
+    return (
+        silver_stime
+        .groupBy(
+            col("comune"),
+            col("provincia")
+        )
+        .agg(
+            countDistinct("idsensore").alias("num_sensori_totali"),
+            countDistinct(when(col("is_attivo") == True, col("idsensore"))).alias("num_sensori_attivi"),
+            concat_ws(", ", collect_set("nometiposensore")).alias("inquinanti_stimati"),
+            spark_min("datastart").alias("data_inizio_attivita"),
+            spark_max("datastop").alias("data_fine_attivita"),
+            spark_max("_ingestion_ts").alias("_updated_at")
+        )
+    )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 5. Gold Monitored & Estimated Pollutants Catalog (`inquinanti`)
+
+# COMMAND ----------
+
+INQUINANTI_SCHEMA = """
+    nometiposensore STRING COMMENT 'Standardized name of the pollutant parameter (e.g., PM10, PM2.5, Biossido di Azoto, Ozono)',
+    unitamisura STRING COMMENT 'Unit of measurement for pollutant concentration (e.g., µg/m³, mg/m³)',
+    ha_misure_stazioni BOOLEAN COMMENT 'Flag indicating if the pollutant is monitored by physical stations',
+    ha_stime_comunali BOOLEAN COMMENT 'Flag indicating if the pollutant has municipal model-based estimates',
+    num_sensori_totali LONG COMMENT 'Total number of active sensors (physical + virtual estimates)',
+    num_sensori_stazioni LONG COMMENT 'Number of physical monitoring station sensors',
+    num_sensori_stime LONG COMMENT 'Number of municipal estimate virtual sensors',
+    num_comuni_coperti LONG COMMENT 'Number of distinct municipalities covered in Bergamo province',
+    soglia_riferimento_legge STRING COMMENT 'Regulatory reference threshold limit under Italian D.Lgs. 155/2010',
+    _updated_at TIMESTAMP COMMENT 'Deterministic timestamp of latest source ingestion (_ingestion_ts)'
+"""
+
+@dp.table(
+    name=target_inquinanti,
+    comment="Catalog of monitored and estimated air quality pollutants in Bergamo with coverage and regulatory limits (SCD1)",
+    schema=INQUINANTI_SCHEMA,
+    table_properties={
+        "quality": "gold",
+        "pipelines.autoOptimize.zOrderCols": "nometiposensore"
+    }
+)
+def inquinanti():
+    """
+    Produces the consolidated list of pollutants monitored or estimated across Bergamo province,
+    aggregating metadata from active physical stations (stazioni_aria) and municipal estimates (anagrafica_stime).
+    """
+    stazioni = (
+        dp.read(f"{silver_schema}.stazioni_aria")
+        .filter(col("__END_AT").isNull())
+        .select(
+            col("nometiposensore"),
+            col("unitamisura"),
+            col("comune"),
+            col("idsensore"),
+            lit("stazione").alias("fonte"),
+            col("_ingestion_ts")
+        )
+    )
+
+    stime = (
+        dp.read(f"{silver_schema}.anagrafica_stime")
+        .filter(col("__END_AT").isNull())
+        .select(
+            col("nometiposensore"),
+            col("unitamisura"),
+            col("comune"),
+            col("idsensore"),
+            lit("stima").alias("fonte"),
+            col("_ingestion_ts")
+        )
+    )
+
+    combined = stazioni.unionByName(stime)
+
+    return (
+        combined
+        .groupBy(
+            col("nometiposensore"),
+            col("unitamisura")
+        )
+        .agg(
+            countDistinct("idsensore").alias("num_sensori_totali"),
+            countDistinct(when(col("fonte") == "stazione", col("idsensore"))).alias("num_sensori_stazioni"),
+            countDistinct(when(col("fonte") == "stima", col("idsensore"))).alias("num_sensori_stime"),
+            countDistinct("comune").alias("num_comuni_coperti"),
+            spark_max(when(col("fonte") == "stazione", lit(True)).otherwise(lit(False))).alias("ha_misure_stazioni"),
+            spark_max(when(col("fonte") == "stima", lit(True)).otherwise(lit(False))).alias("ha_stime_comunali"),
+            spark_max("_ingestion_ts").alias("_updated_at")
+        )
+        .withColumn(
+            "soglia_riferimento_legge",
+            when(col("nometiposensore").rlike("(?i)PM10"), lit("D.Lgs. 155/2010: Media giornaliera max 50 µg/m³ (max 35 gg/anno)"))
+            .when(col("nometiposensore").rlike("(?i)PM2\\.5"), lit("D.Lgs. 155/2010: Media annua 25 µg/m³ (WHO rif. 25 µg/m³ giornaliera)"))
+            .when(col("nometiposensore").rlike("(?i)Biossido di Azoto|NO2"), lit("D.Lgs. 155/2010: Soglia oraria max 200 µg/m³"))
+            .when(col("nometiposensore").rlike("(?i)Ozono|O3"), lit("D.Lgs. 155/2010: Media 8h max 120 µg/m³"))
+            .when(col("nometiposensore").rlike("(?i)Monossido di Carbonio|CO"), lit("D.Lgs. 155/2010: Max 8h mobile 10 mg/m³"))
+            .when(col("nometiposensore").rlike("(?i)Biossido di Zolfo|SO2"), lit("D.Lgs. 155/2010: Media oraria max 350 µg/m³"))
+            .when(col("nometiposensore").rlike("(?i)Benzene|C6H6"), lit("D.Lgs. 155/2010: Media annua 5 µg/m³"))
+            .otherwise(lit("Nessuna soglia tabellare specifica"))
         )
     )
