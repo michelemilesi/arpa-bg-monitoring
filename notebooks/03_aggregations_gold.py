@@ -3,7 +3,7 @@
 # MAGIC # 03 - Spark Declarative Pipeline (Gold Analytics & KPIs - SCD1)
 # MAGIC 
 # MAGIC This notebook implements the **Gold Layer** of the Spark Declarative Pipeline using `pyspark.pipelines`:
-# MAGIC 1. Reads current active records (`__END_AT IS NULL`) from Silver SCD2 tables (`stazioni_aria`, `rilevazioni_aria`, `anagrafica_stime`).
+# MAGIC 1. Reads current active records (`__END_AT IS NULL`) from Silver SCD2 tables (`stazioni_aria`, `rilevazioni_aria`, `anagrafica_stime`, `stime_comunali`).
 # MAGIC 2. Implements **SCD1** aggregate datasets (current snapshot state updated in-place via Declarative Pipeline Materialized Views).
 # MAGIC 3. Computes:
 # MAGIC    - **`daily_metrics`**: Daily average, minimum, maximum, and 24-hour reading completeness percentage by municipality and pollutant.
@@ -11,6 +11,7 @@
 # MAGIC    - **`station_summary`**: High-level station registry overview with geographic coordinates, active sensors, and temporal range.
 # MAGIC    - **`comuni`**: Comprehensive catalog of municipalities in the Province of Bergamo from municipal estimates registry (`anagrafica_stime`).
 # MAGIC    - **`inquinanti`**: Catalog of monitored and estimated air pollutants with coverage and legal thresholds.
+# MAGIC    - **`stime_comunali`**: Enriched municipal air quality daily estimates joining active estimates with sensor and municipality metadata.
 # MAGIC 4. Clean table names without layer prefixes within the Gold schema (`gold_schema`).
 # MAGIC 5. Explicit schemas and full English comments on all tables and columns.
 
@@ -43,6 +44,7 @@ target_exceedances = f"{gold_schema}.exceedances"
 target_station_summary = f"{gold_schema}.station_summary"
 target_comuni = f"{gold_schema}.comuni"
 target_inquinanti = f"{gold_schema}.inquinanti"
+target_stime_comunali = f"{gold_schema}.stime_comunali"
 
 # COMMAND ----------
 
@@ -429,5 +431,76 @@ def inquinanti():
             .when(col("nometiposensore").rlike("(?i)Biossido di Zolfo|SO2"), lit("D.Lgs. 155/2010: Media oraria max 350 µg/m³"))
             .when(col("nometiposensore").rlike("(?i)Benzene|C6H6"), lit("D.Lgs. 155/2010: Media annua 5 µg/m³"))
             .otherwise(lit("Nessuna soglia tabellare specifica"))
+        )
+    )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 6. Gold Enriched Municipal Air Quality Estimates (`stime_comunali`)
+
+# COMMAND ----------
+
+STIME_COMUNALI_SCHEMA = """
+    nometiposensore STRING COMMENT 'Normalized pollutant name for municipal estimates (e.g., PM10, PM2.5, NO2, Ozono)',
+    comune STRING COMMENT 'Municipality name in the Province of Bergamo',
+    valore DOUBLE COMMENT 'Model-estimated air quality concentration reading',
+    unitamisura STRING COMMENT 'Unit of measurement for pollutant concentration (e.g., µg/m³)',
+    data TIMESTAMP COMMENT 'Observation timestamp of the municipal estimate',
+    anno INT COMMENT 'Extracted year of observation',
+    mese INT COMMENT 'Extracted month of observation (1-12)',
+    giorno INT COMMENT 'Extracted day of month (1-31)',
+    giorno_settimana STRING COMMENT 'Short day of week name (Mon, Tue, etc.)',
+    is_weekend BOOLEAN COMMENT 'Flag indicating weekend days (Saturday or Sunday)',
+    _updated_at TIMESTAMP COMMENT 'Deterministic timestamp of latest source ingestion (_ingestion_ts) contributing to this record'
+"""
+
+@dp.table(
+    name=target_stime_comunali,
+    comment="Enriched municipal air quality daily estimates with municipality and pollutant metadata in Bergamo (SCD1)",
+    schema=STIME_COMUNALI_SCHEMA,
+    table_properties={
+        "quality": "gold",
+        "pipelines.autoOptimize.zOrderCols": "comune,nometiposensore,data"
+    }
+)
+def stime_comunali():
+    """
+    Produces enriched municipal air quality estimates by joining active municipal estimates
+    with active municipal estimates sensor registry metadata:
+    - a.nometiposensore
+    - a.comune
+    - sc.valore
+    - a.unitamisura
+    - sc.data
+    - sc.anno
+    - sc.mese
+    - sc.giorno
+    - sc.giorno_settimana
+    - sc.is_weekend
+    - _updated_at (deterministic latest _ingestion_ts)
+    Filters current versions (__END_AT is null) to represent the current state (SCD1).
+    """
+    sc = dp.read(f"{silver_schema}.stime_comunali").filter(col("__END_AT").isNull()).alias("sc")
+    a = dp.read(f"{silver_schema}.anagrafica_stime").filter(col("__END_AT").isNull()).alias("a")
+
+    return (
+        sc.join(a, on="idsensore", how="inner")
+        .select(
+            col("a.nometiposensore"),
+            col("a.comune"),
+            col("sc.valore"),
+            col("a.unitamisura"),
+            col("sc.data"),
+            col("sc.anno"),
+            col("sc.mese"),
+            col("sc.giorno"),
+            col("sc.giorno_settimana"),
+            col("sc.is_weekend"),
+            coalesce(
+                greatest(col("sc._ingestion_ts"), col("a._ingestion_ts")),
+                col("sc._ingestion_ts"),
+                col("a._ingestion_ts")
+            ).alias("_updated_at")
         )
     )
