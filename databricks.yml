@@ -21,6 +21,9 @@ variables:
   gold_schema:
     description: Schema for aggregated gold metrics (SCD1)
     default: dev_gold
+  include_historical:
+    description: Flag to enable download of historical data (pre-2026). Disabled by default.
+    default: "false"
 
 targets:
   dev:
@@ -36,6 +39,7 @@ targets:
       bronze_schema: dev_bronze
       silver_schema: dev_silver
       gold_schema: dev_gold
+      include_historical: "false"
 
   prod:
     mode: production
@@ -47,6 +51,7 @@ targets:
       bronze_schema: prod_bronze
       silver_schema: prod_silver
       gold_schema: prod_gold
+      include_historical: "false"
     permissions:
       - user_name: michele.milesi.76@gmail.com
         level: CAN_MANAGE

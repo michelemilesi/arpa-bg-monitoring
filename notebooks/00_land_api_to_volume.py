@@ -33,6 +33,7 @@ dbutils.widgets.text("gold_schema", "dev_gold", "4. Gold Schema")
 dbutils.widgets.text("filter_province", "BG", "5. Province Filter")
 dbutils.widgets.text("start_date", "2024-01-01T00:00:00.000", "6. Start Date")
 dbutils.widgets.text("page_size", "50000", "7. SODA Page Size")
+dbutils.widgets.dropdown("include_historical", "false", ["false", "true"], "8. Include Historical (pre-2026)")
 
 catalog = dbutils.widgets.get("catalog").strip()
 bronze_schema = dbutils.widgets.get("bronze_schema").strip()
@@ -41,6 +42,9 @@ gold_schema = dbutils.widgets.get("gold_schema").strip()
 filter_province = dbutils.widgets.get("filter_province").strip()
 start_date = dbutils.widgets.get("start_date").strip()
 page_size = int(dbutils.widgets.get("page_size").strip())
+include_historical = dbutils.widgets.get("include_historical").strip().lower() in ("true", "1", "yes")
+
+print(f"Runtime parameters: province={filter_province}, start_date={start_date}, include_historical={include_historical}")
 
 batch_id = str(uuid.uuid4())
 run_ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -62,9 +66,11 @@ spark.sql(f"CREATE VOLUME IF NOT EXISTS `{catalog}`.`{bronze_schema}`.`landing` 
 landing_volume_path = f"/Volumes/{catalog}/{bronze_schema}/landing"
 stazioni_landing_dir = f"{landing_volume_path}/stazioni"
 rilevazioni_landing_dir = f"{landing_volume_path}/rilevazioni"
+anagrafica_stime_landing_dir = f"{landing_volume_path}/anagrafica_stime"
+stime_landing_dir = f"{landing_volume_path}/stime"
 
 # Ensure landing subdirectories exist
-for path in [stazioni_landing_dir, rilevazioni_landing_dir]:
+for path in [stazioni_landing_dir, rilevazioni_landing_dir, anagrafica_stime_landing_dir, stime_landing_dir]:
     try:
         dbutils.fs.mkdirs(path)
     except Exception as e:
@@ -101,7 +107,7 @@ print(f"Station metadata file landed at: {stazioni_filename}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### 3. Hourly Sensor Measurement Extraction & Landing (`nicp-bhqi`)
+# MAGIC ### 3. Hourly Sensor Measurement Extraction & Landing (`g2hp-ar79` [2018-2025] & `nicp-bhqi` [2026+])
 
 # COMMAND ----------
 
@@ -109,27 +115,89 @@ print(f"Station metadata file landed at: {stazioni_filename}")
 sensor_ids = [str(item["idsensore"]) for item in stations_data if "idsensore" in item]
 print(f"Sensors identified for Bergamo province: {len(sensor_ids)}")
 
-print("Starting batched measurement extraction with throttling management...")
+meas_datasets = client.get_measurement_datasets(start_date=start_date, include_historical=include_historical)
+print(f"Target physical measurement datasets for start_date '{start_date}' (include_historical={include_historical}): {meas_datasets}")
+
 meas_chunk_idx = 0
 total_measurements = 0
 
-for page in client.iter_measurements_for_sensors(
-    sensor_ids=sensor_ids,
-    start_date=start_date if start_date else None,
-    chunk_size_sensors=40,
-    page_size=page_size,
-):
-    if not page:
-        continue
+for ds in meas_datasets:
+    print(f"Starting batched measurement extraction from dataset '{ds}' with throttling management...")
+    for page in client.iter_measurements_for_sensors(
+        sensor_ids=sensor_ids,
+        start_date=start_date if start_date else None,
+        chunk_size_sensors=40,
+        page_size=page_size,
+        dataset_id=ds,
+    ):
+        if not page:
+            continue
 
-    meas_chunk_idx += 1
-    total_measurements += len(page)
+        meas_chunk_idx += 1
+        total_measurements += len(page)
 
-    meas_filename = f"{rilevazioni_landing_dir}/rilevazioni_batch_{run_ts}_{meas_chunk_idx}_{batch_id}.json"
-    dbutils.fs.put(meas_filename, json.dumps(page), overwrite=True)
-    print(f"Chunk {meas_chunk_idx}: landed {len(page)} measurements to {meas_filename}")
+        meas_filename = f"{rilevazioni_landing_dir}/rilevazioni_{ds}_batch_{run_ts}_{meas_chunk_idx}_{batch_id}.json"
+        dbutils.fs.put(meas_filename, json.dumps(page), overwrite=True)
+        print(f"[{ds}] Chunk {meas_chunk_idx}: landed {len(page)} measurements to {meas_filename}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 4. Municipal Estimates Sensor Registry Extraction & Landing (`5rep-i3mj`)
+
+# COMMAND ----------
+
+print(f"Downloading municipal estimates sensor registry for province: {filter_province}...")
+estimates_registry_data = client.get_estimates_registry(province=filter_province, limit=50000)
+print(f"Downloaded {len(estimates_registry_data)} municipal estimate sensor records.")
+
+if estimates_registry_data:
+    est_registry_filename = f"{anagrafica_stime_landing_dir}/anagrafica_stime_batch_{run_ts}_{batch_id}.json"
+    dbutils.fs.put(est_registry_filename, json.dumps(estimates_registry_data), overwrite=True)
+    print(f"Municipal estimates registry landed at: {est_registry_filename}")
+else:
+    print(f"Warning: No estimates registry records returned for province {filter_province}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 5. Municipal Air Quality Estimates Data Extraction & Landing (`qyg8-q6gd` [2024], `2vr2-r6un` [2025], `ysm5-jwrn` [2026+])
+
+# COMMAND ----------
+
+# Extract list of sensor IDs for municipal estimates in Bergamo
+estimates_sensor_ids = [str(item["idsensore"]) for item in estimates_registry_data if "idsensore" in item]
+print(f"Municipal estimate sensors identified for {filter_province}: {len(estimates_sensor_ids)}")
+
+est_datasets = client.get_estimate_datasets(start_date=start_date, include_historical=include_historical)
+print(f"Target municipal estimate datasets for start_date '{start_date}' (include_historical={include_historical}): {est_datasets}")
+
+est_chunk_idx = 0
+total_estimates = 0
+
+for ds in est_datasets:
+    print(f"Starting batched municipal estimates extraction from dataset '{ds}' with throttling management...")
+    for page in client.iter_measurements_for_sensors(
+        sensor_ids=estimates_sensor_ids,
+        start_date=start_date if start_date else None,
+        chunk_size_sensors=40,
+        page_size=page_size,
+        dataset_id=ds,
+    ):
+        if not page:
+            continue
+
+        est_chunk_idx += 1
+        total_estimates += len(page)
+
+        est_filename = f"{stime_landing_dir}/stime_{ds}_batch_{run_ts}_{est_chunk_idx}_{batch_id}.json"
+        dbutils.fs.put(est_filename, json.dumps(page), overwrite=True)
+        print(f"[{ds}] Chunk {est_chunk_idx}: landed {len(page)} municipal estimates to {est_filename}")
 
 print(f"\nLanding completed successfully:")
-print(f"- Stations:     1 JSON file ({len(stations_data)} records)")
-print(f"- Measurements: {meas_chunk_idx} JSON files ({total_measurements} total records)")
+print(f"- Stations (ib47-atvt):              1 JSON file ({len(stations_data)} records)")
+print(f"- Measurements ({', '.join(meas_datasets)}): {meas_chunk_idx} JSON files ({total_measurements} total records)")
+print(f"- Estimates Registry (5rep-i3mj):    1 JSON file ({len(estimates_registry_data)} records)")
+print(f"- Estimates Data ({', '.join(est_datasets)}): {est_chunk_idx} JSON files ({total_estimates} total records)")
 print(f"Raw landing files ready for Spark Declarative Pipeline (DLT) at: {landing_volume_path}")
+

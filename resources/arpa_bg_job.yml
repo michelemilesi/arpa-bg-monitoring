@@ -15,6 +15,7 @@ resources:
               silver_schema: ${var.silver_schema}
               gold_schema: ${var.gold_schema}
               filter_province: "BG"
+              include_historical: ${var.include_historical}
         - task_key: bronze_pipeline
           depends_on:
             - task_key: fetch_api_to_landing

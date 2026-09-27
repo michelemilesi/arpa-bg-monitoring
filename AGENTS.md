@@ -21,9 +21,13 @@ All datasets originate from **Open Data Regione Lombardia** hosted on the Socrat
 
 | Dataset | Socrata ID | SODA Endpoint | Description |
 |---|---|---|---|
-| **Air Quality Stations (Metadata)** | `ib47-atvt` | `https://www.dati.lombardia.it/resource/ib47-atvt.json` | Registry of monitoring stations and sensors: coordinates (`lat`, `lng`), municipality, province, measured pollutant, altitude, start/end dates of activity. |
-| **Air Quality Sensor Data (Measurements)** | `nicp-bhqi` | `https://www.dati.lombardia.it/resource/nicp-bhqi.json` | Hourly/daily sensor measurements including `IdSensore`, `Data`, `Valore`, `Stato`. |
-| **Municipal Air Quality Estimates** | `2vr2-r6un` | `https://www.dati.lombardia.it/resource/2vr2-r6un.json` | Model-based municipal estimates produced by ARPA for municipalities without fixed physical monitoring stations. |
+| **Air Quality Stations (Metadata)** | `ib47-atvt` | `https://www.dati.lombardia.it/resource/ib47-atvt.json` | Registry of physical monitoring stations and sensors: coordinates (`lat`, `lng`), municipality, province, measured pollutant, altitude, start/end dates of activity. |
+| **Air Quality Sensor Data (2018–2025)** | `g2hp-ar79` | `https://www.dati.lombardia.it/resource/g2hp-ar79.json` | Historical sensor measurements covering years 2018 up to 2025 inclusive. |
+| **Air Quality Sensor Data (2026+)** | `nicp-bhqi` | `https://www.dati.lombardia.it/resource/nicp-bhqi.json` | Ongoing year hourly/daily sensor measurements including `IdSensore`, `Data`, `Valore`, `Stato`. |
+| **Municipal Estimates Registry** | `5rep-i3mj` | `https://www.dati.lombardia.it/resource/5rep-i3mj.json` | Registry of municipal air quality estimate sensors: municipality, province, measured pollutant, start/end dates. |
+| **Municipal Air Quality Estimates (2024)** | `qyg8-q6gd` | `https://www.dati.lombardia.it/resource/qyg8-q6gd.json` | Model-based municipal daily estimates for year 2024. |
+| **Municipal Air Quality Estimates (2025)** | `2vr2-r6un` | `https://www.dati.lombardia.it/resource/2vr2-r6un.json` | Model-based municipal daily estimates for year 2025. |
+| **Municipal Air Quality Estimates (2026+)** | `ysm5-jwrn` | `https://www.dati.lombardia.it/resource/ysm5-jwrn.json` | Model-based municipal daily estimates for ongoing year 2026+. |
 
 ### 2.2 Ingestion Method (SODA API)
 

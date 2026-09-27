@@ -32,6 +32,8 @@ silver_schema = spark.conf.get("silver_schema", "dev_silver")
 
 target_stazioni_silver = f"{silver_schema}.stazioni_aria"
 target_rilevazioni_silver = f"{silver_schema}.rilevazioni_aria"
+target_anagrafica_stime_silver = f"{silver_schema}.anagrafica_stime"
+target_stime_silver = f"{silver_schema}.stime_comunali"
 
 # COMMAND ----------
 
@@ -193,3 +195,151 @@ dp.create_auto_cdc_flow(
     sequence_by=col("_ingestion_ts"),
     stored_as_scd_type="2"
 )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 3. Silver Municipal Estimates Sensor Registry: Cleansing & Auto CDC (SCD2)
+
+# COMMAND ----------
+
+SILVER_ANAGRAFICA_STIME_SCHEMA = """
+    idsensore STRING COMMENT 'Unique identifier of the municipal estimate sensor (business primary key)',
+    nometiposensore STRING COMMENT 'Normalized monitored pollutant name (PM10, PM2.5, NO2, Ozono)',
+    unitamisura STRING COMMENT 'Standardized unit of measurement (e.g., µg/m³)',
+    idstazione STRING COMMENT 'Unique identifier of the municipal virtual station',
+    sensore STRING COMMENT 'Cleaned descriptive sensor name',
+    provincia STRING COMMENT 'Normalized province code (strictly BG)',
+    comune STRING COMMENT 'Cleaned municipality name in the Province of Bergamo',
+    storico STRING COMMENT 'Historical archive flag indicator (S = Archived, N = Active)',
+    datastart TIMESTAMP COMMENT 'Sensor activation start timestamp',
+    datastop TIMESTAMP COMMENT 'Sensor deactivation timestamp (NULL if currently active)',
+    is_attivo BOOLEAN COMMENT 'Flag indicating if the sensor is currently operating',
+    _ingestion_ts TIMESTAMP COMMENT 'Ingestion timestamp propagated from bronze',
+    __START_AT TIMESTAMP COMMENT 'Record validity start timestamp managed automatically by Auto CDC (SCD Type 2)',
+    __END_AT TIMESTAMP COMMENT 'Record validity end timestamp managed automatically by Auto CDC (SCD Type 2, NULL for current active record)'
+"""
+
+@dp.view(
+    name="silver_anagrafica_stime_clean",
+    comment="Streaming view filtering and cleansing municipal estimate sensors for Bergamo province"
+)
+@dp.expect_or_drop("valid_idsensore_stime_silver", "idsensore IS NOT NULL")
+@dp.expect_or_drop("valid_bergamo_province_stime", "provincia = 'BG'")
+def silver_anagrafica_stime_clean():
+    """
+    Cleans raw municipal estimates sensor registry stream:
+    - Filters strictly for Province of Bergamo ('BG')
+    - Cleans whitespace and normalizes text fields
+    - Converts start and end dates to TIMESTAMP
+    - Adds boolean is_attivo flag
+    """
+    return (
+        dp.read_stream("anagrafica_stime_raw")
+        .filter(upper(trim(col("provincia"))) == "BG")
+        .select(
+            trim(col("idsensore")).alias("idsensore"),
+            trim(col("nometiposensore")).alias("nometiposensore"),
+            trim(col("unitamisura")).alias("unitamisura"),
+            trim(col("idstazione")).alias("idstazione"),
+            trim(col("sensore")).alias("sensore"),
+            upper(trim(col("provincia"))).alias("provincia"),
+            trim(col("comune")).alias("comune"),
+            trim(col("storico")).alias("storico"),
+            to_timestamp(col("datastart")).alias("datastart"),
+            to_timestamp(col("datastop")).alias("datastop"),
+            when(col("datastop").isNull(), True).otherwise(False).alias("is_attivo"),
+            col("_ingestion_ts")
+        )
+    )
+
+dp.create_streaming_table(
+    name=target_anagrafica_stime_silver,
+    comment="Cleaned and validated municipal estimates sensor registry in Bergamo (SCD Type 2)",
+    schema=SILVER_ANAGRAFICA_STIME_SCHEMA,
+    table_properties={
+        "quality": "silver",
+        "delta.enableChangeDataFeed": "true",
+        "pipelines.autoOptimize.zOrderCols": "idsensore,comune"
+    }
+)
+
+dp.create_auto_cdc_flow(
+    target=target_anagrafica_stime_silver,
+    source="silver_anagrafica_stime_clean",
+    keys=["idsensore"],
+    sequence_by=col("_ingestion_ts"),
+    stored_as_scd_type="2"
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 4. Silver Municipal Air Quality Estimates Data: Cleansing & Auto CDC (SCD2)
+
+# COMMAND ----------
+
+SILVER_STIME_COMUNALI_SCHEMA = """
+    idsensore STRING COMMENT 'Unique identifier of the municipal estimate sensor (foreign key to anagrafica_stime)',
+    data TIMESTAMP COMMENT 'Observation timestamp for daily municipal estimate',
+    valore DOUBLE COMMENT 'Model-estimated concentration reading in physical range (valore >= 0)',
+    idoperatore STRING COMMENT 'Identifier of the operator or validating authority',
+    anno INT COMMENT 'Extracted year of observation',
+    mese INT COMMENT 'Extracted month of observation (1-12)',
+    giorno INT COMMENT 'Extracted day of month (1-31)',
+    giorno_settimana STRING COMMENT 'Short day of week name (Mon, Tue, etc.)',
+    is_weekend BOOLEAN COMMENT 'Flag indicating weekend days (Saturday or Sunday)',
+    _ingestion_ts TIMESTAMP COMMENT 'Ingestion timestamp propagated from bronze',
+    __START_AT TIMESTAMP COMMENT 'Record validity start timestamp managed automatically by Auto CDC (SCD Type 2)',
+    __END_AT TIMESTAMP COMMENT 'Record validity end timestamp managed automatically by Auto CDC (SCD Type 2, NULL for current active record)'
+"""
+
+@dp.view(
+    name="silver_stime_comunali_clean",
+    comment="Streaming view cleansing municipal air quality estimates data"
+)
+@dp.expect_or_drop("valid_keys_stime", "idsensore IS NOT NULL AND data IS NOT NULL")
+@dp.expect_or_drop("non_negative_estimate_value", "valore IS NOT NULL AND valore >= 0.0")
+@dp.expect("plausible_estimate_range", "valore <= 1000.0")
+def silver_stime_comunali_clean():
+    """
+    Cleans raw municipal estimates stream:
+    - Filters out negative sentinel values (-999) and unphysical values
+    - Enriches with temporal calendar dimensions for downstream aggregation
+    """
+    return (
+        dp.read_stream("stime_comunali_raw")
+        .filter(col("valore").isNotNull() & (col("valore") >= 0.0))
+        .select(
+            trim(col("idsensore")).alias("idsensore"),
+            col("data"),
+            col("valore").cast("double").alias("valore"),
+            trim(col("idoperatore")).alias("idoperatore"),
+            year(col("data")).alias("anno"),
+            month(col("data")).alias("mese"),
+            dayofmonth(col("data")).alias("giorno"),
+            date_format(col("data"), "E").alias("giorno_settimana"),
+            when(dayofweek(col("data")).isin(1, 7), True).otherwise(False).alias("is_weekend"),
+            col("_ingestion_ts")
+        )
+    )
+
+dp.create_streaming_table(
+    name=target_stime_silver,
+    comment="Cleaned, validated, and temporally enriched municipal air quality estimates in Bergamo (SCD Type 2)",
+    schema=SILVER_STIME_COMUNALI_SCHEMA,
+    table_properties={
+        "quality": "silver",
+        "delta.enableChangeDataFeed": "true",
+        "pipelines.autoOptimize.zOrderCols": "idsensore,data"
+    }
+)
+
+dp.create_auto_cdc_flow(
+    target=target_stime_silver,
+    source="silver_stime_comunali_clean",
+    keys=["idsensore", "data"],
+    sequence_by=col("_ingestion_ts"),
+    stored_as_scd_type="2"
+)
+

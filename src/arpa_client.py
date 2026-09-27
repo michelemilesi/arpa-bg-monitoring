@@ -17,7 +17,20 @@ logger = logging.getLogger(__name__)
 # Socrata Open Data endpoints
 BASE_URL = "https://www.dati.lombardia.it/resource"
 DATASET_STATIONS = "ib47-atvt"
-DATASET_MEASUREMENTS = "nicp-bhqi"
+
+# Physical station measurements
+DATASET_MEASUREMENTS_HISTORICAL = "g2hp-ar79"  # 2018 - 2025
+DATASET_MEASUREMENTS_CURRENT = "nicp-bhqi"     # 2026+ (ongoing year)
+DATASET_MEASUREMENTS = DATASET_MEASUREMENTS_CURRENT  # Backward compatibility
+
+# Municipal estimates registry
+DATASET_ESTIMATES_REGISTRY = "5rep-i3mj"
+
+# Municipal estimates data (annual datasets + current year)
+DATASET_ESTIMATES_2024 = "qyg8-q6gd"           # 2024
+DATASET_ESTIMATES_2025 = "2vr2-r6un"           # 2025
+DATASET_ESTIMATES_CURRENT = "ysm5-jwrn"        # 2026+ (ongoing year)
+DATASET_ESTIMATES_DATA = DATASET_ESTIMATES_CURRENT   # Backward compatibility
 
 
 class ArpaSocrataClient:
@@ -110,6 +123,44 @@ class ArpaSocrataClient:
                     logger.error("Network error fetching %s: %s", url, err.reason)
                     raise
 
+    @staticmethod
+    def get_measurement_datasets(
+        start_date: Optional[str] = None,
+        include_historical: bool = False,
+    ) -> List[str]:
+        """
+        Determines the list of Socrata datasets to query for physical station measurements
+        based on target start_date and whether historical data is enabled.
+        - By default (include_historical=False): only queries the ongoing year 2026+ (nicp-bhqi).
+        - If include_historical=True and start_date < 2026-01-01: queries g2hp-ar79 (2018-2025) and nicp-bhqi.
+        """
+        if include_historical and (not start_date or start_date < "2026-01-01"):
+            return [DATASET_MEASUREMENTS_HISTORICAL, DATASET_MEASUREMENTS_CURRENT]
+        return [DATASET_MEASUREMENTS_CURRENT]
+
+    @staticmethod
+    def get_estimate_datasets(
+        start_date: Optional[str] = None,
+        include_historical: bool = False,
+    ) -> List[str]:
+        """
+        Determines the list of Socrata datasets to query for municipal air quality estimates
+        based on target start_date and whether historical data is enabled.
+        - By default (include_historical=False): only queries the ongoing year 2026+ (ysm5-jwrn).
+        - If include_historical=True: queries annual datasets (qyg8-q6gd [2024], 2vr2-r6un [2025])
+          based on start_date, plus ysm5-jwrn.
+        """
+        if not include_historical:
+            return [DATASET_ESTIMATES_CURRENT]
+
+        datasets = []
+        if not start_date or start_date < "2025-01-01":
+            datasets.append(DATASET_ESTIMATES_2024)
+        if not start_date or start_date < "2026-01-01":
+            datasets.append(DATASET_ESTIMATES_2025)
+        datasets.append(DATASET_ESTIMATES_CURRENT)
+        return datasets
+
     def get_stations(
         self,
         province: str = "BG",
@@ -134,6 +185,30 @@ class ArpaSocrataClient:
         logger.info("Fetching stations from: %s", url)
         return self._execute_request(url)
 
+    def get_estimates_registry(
+        self,
+        province: str = "BG",
+        dataset_id: str = DATASET_ESTIMATES_REGISTRY,
+        limit: int = 50000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch municipal estimates sensor registry (Anagrafica stime comunali).
+        :param province: Province filter (e.g. 'BG' for Bergamo). Pass None or 'ALL' for entire region.
+        :param dataset_id: Socrata dataset ID for estimates registry (default: 5rep-i3mj).
+        :param limit: Max rows to return.
+        """
+        query_params = {
+            "$limit": str(limit),
+            "$order": "idsensore ASC",
+        }
+        if province and province.upper() != "ALL":
+            query_params["$where"] = f"provincia = '{province.upper()}'"
+
+        query_string = urllib.parse.urlencode(query_params)
+        url = f"{self.base_url}/{dataset_id}.json?{query_string}"
+        logger.info("Fetching estimates registry from: %s", url)
+        return self._execute_request(url)
+
     def get_measurements_page(
         self,
         dataset_id: str = DATASET_MEASUREMENTS,
@@ -143,7 +218,7 @@ class ArpaSocrataClient:
         order_by: str = "data DESC",
     ) -> List[Dict[str, Any]]:
         """
-        Fetch a single page of sensor measurements.
+        Fetch a single page of sensor measurements or municipal estimates.
         """
         query_params = {
             "$limit": str(limit),
@@ -164,9 +239,10 @@ class ArpaSocrataClient:
         chunk_size_sensors: int = 40,
         page_size: int = 50000,
         max_records_per_chunk: Optional[int] = None,
+        dataset_id: str = DATASET_MEASUREMENTS,
     ) -> Generator[List[Dict[str, Any]], None, None]:
         """
-        Generator yielding batches of measurements for a given list of sensor IDs.
+        Generator yielding batches of measurements or estimates for a given list of sensor IDs.
         Chunks sensor IDs to prevent URI-length limitations and paginates through records.
         Yields list of records per page.
         """
@@ -197,6 +273,7 @@ class ArpaSocrataClient:
                     page_size,
                 )
                 page = self.get_measurements_page(
+                    dataset_id=dataset_id,
                     where_clause=where_clause,
                     limit=page_size,
                     offset=offset,

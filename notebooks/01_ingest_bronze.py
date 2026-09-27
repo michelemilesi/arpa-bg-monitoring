@@ -22,8 +22,13 @@ landing_volume = spark.conf.get(
 bronze_schema = spark.conf.get("bronze_schema", "dev_bronze")
 stazioni_landing_path = f"{landing_volume}/stazioni"
 rilevazioni_landing_path = f"{landing_volume}/rilevazioni"
+anagrafica_stime_landing_path = f"{landing_volume}/anagrafica_stime"
+stime_landing_path = f"{landing_volume}/stime"
+
 target_stazioni_bronze = f"{bronze_schema}.stazioni_aria"
 target_rilevazioni_bronze = f"{bronze_schema}.rilevazioni_aria"
+target_anagrafica_stime_bronze = f"{bronze_schema}.anagrafica_stime"
+target_stime_bronze = f"{bronze_schema}.stime_comunali"
 
 # COMMAND ----------
 
@@ -171,3 +176,135 @@ dp.create_auto_cdc_flow(
     sequence_by=col("_ingestion_ts"),
     stored_as_scd_type="2"
 )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 3. Municipal Estimates Sensor Registry: Streaming Ingestion & Auto CDC (SCD2)
+
+# COMMAND ----------
+
+ANAGRAFICA_STIME_SCHEMA = """
+    idsensore STRING COMMENT 'Unique identifier of the municipal estimate sensor (business primary key)',
+    nometiposensore STRING COMMENT 'Estimated pollutant parameter (e.g., PM10, Ozono, Biossido di Azoto, PM2.5)',
+    unitamisura STRING COMMENT 'Unit of measurement for pollutant concentration (e.g., µg/m³)',
+    idstazione STRING COMMENT 'Unique identifier of the municipal virtual station',
+    sensore STRING COMMENT 'Full descriptive name of the municipal estimate sensor',
+    provincia STRING COMMENT 'Province code (e.g., BG for Bergamo)',
+    comune STRING COMMENT 'Municipality in the Province of Bergamo for the estimate',
+    storico STRING COMMENT 'Historical archive flag indicator (S for historical/archived, N for active)',
+    datastart STRING COMMENT 'Estimate sensor activation start date (ISO 8601 string from ARPA)',
+    datastop STRING COMMENT 'Estimate sensor deactivation date (NULL if currently active)',
+    _ingestion_ts TIMESTAMP COMMENT 'Technical ingestion timestamp from the ARPA Open Data service',
+    __START_AT TIMESTAMP COMMENT 'Record validity start timestamp managed automatically by Auto CDC (SCD Type 2)',
+    __END_AT TIMESTAMP COMMENT 'Record validity end timestamp managed automatically by Auto CDC (SCD Type 2, NULL for current active record)'
+"""
+
+@dp.view(
+    name="anagrafica_stime_raw",
+    comment="Streaming view using Auto Loader for raw municipal estimates sensor registry from JSON files"
+)
+@dp.expect_or_drop("valid_idsensore_stime", "idsensore IS NOT NULL")
+def anagrafica_stime_raw():
+    """
+    Incrementally reads raw municipal estimates registry JSON files from the Unity Catalog Volume,
+    normalizes data types, and appends the ingestion timestamp for Auto CDC sequencing.
+    """
+    return (
+        spark.readStream.format("cloudFiles")
+        .option("cloudFiles.format", "json")
+        .option("cloudFiles.schemaHints", "datastart string, datastop string")
+        .load(anagrafica_stime_landing_path)
+        .select(
+            col("idsensore").cast("string").alias("idsensore"),
+            col("nometiposensore").cast("string").alias("nometiposensore"),
+            col("unitamisura").cast("string").alias("unitamisura"),
+            col("idstazione").cast("string").alias("idstazione"),
+            col("sensore").cast("string").alias("sensore"),
+            col("provincia").cast("string").alias("provincia"),
+            col("comune").cast("string").alias("comune"),
+            col("storico").cast("string").alias("storico"),
+            col("datastart").cast("string").alias("datastart"),
+            col("datastop").cast("string").alias("datastop"),
+            current_timestamp().alias("_ingestion_ts")
+        )
+    )
+
+dp.create_streaming_table(
+    name=target_anagrafica_stime_bronze,
+    comment="Municipal air quality estimates sensor registry in the Province of Bergamo (ARPA Lombardia, 5rep-i3mj) with historical change tracking (SCD Type 2)",
+    schema=ANAGRAFICA_STIME_SCHEMA,
+    table_properties={
+        "quality": "bronze",
+        "delta.enableChangeDataFeed": "true",
+        "pipelines.autoOptimize.zOrderCols": "idsensore,comune"
+    }
+)
+
+dp.create_auto_cdc_flow(
+    target=target_anagrafica_stime_bronze,
+    source="anagrafica_stime_raw",
+    keys=["idsensore"],
+    sequence_by=col("_ingestion_ts"),
+    stored_as_scd_type="2"
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 4. Municipal Air Quality Estimates Data: Streaming Ingestion & Auto CDC (SCD2)
+
+# COMMAND ----------
+
+STIME_COMUNALI_SCHEMA = """
+    idsensore STRING COMMENT 'Unique identifier of the municipal estimate sensor (foreign key to anagrafica_stime)',
+    data TIMESTAMP COMMENT 'Observation timestamp for daily municipal air quality estimate',
+    valore DOUBLE COMMENT 'Model-estimated pollutant concentration value',
+    idoperatore STRING COMMENT 'Identifier of the operator or validating entity',
+    _ingestion_ts TIMESTAMP COMMENT 'Technical ingestion timestamp from the ARPA Open Data service',
+    __START_AT TIMESTAMP COMMENT 'Record validity start timestamp managed automatically by Auto CDC (SCD Type 2)',
+    __END_AT TIMESTAMP COMMENT 'Record validity end timestamp managed automatically by Auto CDC (SCD Type 2, NULL for current active record)'
+"""
+
+@dp.view(
+    name="stime_comunali_raw",
+    comment="Streaming view using Auto Loader for raw municipal estimates data (ysm5-jwrn) from JSON files"
+)
+@dp.expect_or_drop("valid_idsensore_data_stime", "idsensore IS NOT NULL AND data IS NOT NULL")
+def stime_comunali_raw():
+    """
+    Incrementally reads raw municipal estimates data JSON files from the Unity Catalog Volume,
+    casts fields to native types (TIMESTAMP, DOUBLE), and appends the ingestion timestamp.
+    """
+    return (
+        spark.readStream.format("cloudFiles")
+        .option("cloudFiles.format", "json")
+        .load(stime_landing_path)
+        .select(
+            col("idsensore").cast("string").alias("idsensore"),
+            to_timestamp(col("data")).alias("data"),
+            col("valore").cast("double").alias("valore"),
+            col("idoperatore").cast("string").alias("idoperatore"),
+            current_timestamp().alias("_ingestion_ts")
+        )
+    )
+
+dp.create_streaming_table(
+    name=target_stime_bronze,
+    comment="Model-based municipal air quality estimates in the Province of Bergamo (ARPA Lombardia, ysm5-jwrn) with historical correction tracking (SCD Type 2)",
+    schema=STIME_COMUNALI_SCHEMA,
+    table_properties={
+        "quality": "bronze",
+        "delta.enableChangeDataFeed": "true",
+        "pipelines.autoOptimize.zOrderCols": "idsensore,data"
+    }
+)
+
+dp.create_auto_cdc_flow(
+    target=target_stime_bronze,
+    source="stime_comunali_raw",
+    keys=["idsensore", "data"],
+    sequence_by=col("_ingestion_ts"),
+    stored_as_scd_type="2"
+)
+
